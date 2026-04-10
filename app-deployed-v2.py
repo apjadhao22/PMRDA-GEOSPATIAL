@@ -299,7 +299,7 @@ with st.sidebar:
         help=(
             "Excludes pixels on slopes steeper than this angle. "
             "Rocky hillsides cause SAR backscatter artifacts even after terrain correction. "
-            "Hinjewadi's hilly fringe requires ~15°."
+            "PMRDA hilly fringe requires ~15°."
         )
     )
     if monthly_mode:
