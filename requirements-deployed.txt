@@ -1,0 +1,8 @@
+streamlit
+geemap==0.35.0
+osmnx
+fpdf
+requests
+setuptools<70.0.0
+ipython==8.12.3
+python-box<7.0.0
