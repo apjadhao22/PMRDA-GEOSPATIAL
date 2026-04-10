@@ -294,6 +294,14 @@ with st.sidebar:
             "Eliminates single-pixel noise. Monthly mode uses 600 sqm to compensate for lower persistence."
         )
     )
+    slope_thresh = st.slider(
+        "Max Detection Slope (°)", 5, 30, 15, step=1,
+        help=(
+            "Excludes pixels on slopes steeper than this angle. "
+            "Rocky hillsides cause SAR backscatter artifacts even after terrain correction. "
+            "Hinjewadi's hilly fringe requires ~15°."
+        )
+    )
     if monthly_mode:
         persistence_required = 1
         st.info("Persistence locked to 1 pass (monthly window has ~2-3 passes available).")
@@ -517,6 +525,12 @@ if run_btn:
         # Both require persistence_mask — change must persist across
         #   multiple independent S1 passes.
         # ----------------------------------------------------------
+        # Slope mask — steep rocky terrain causes SAR artifacts even after
+        # terrain correction. Filter using NASADEM slope layer.
+        dem = ee.Image('NASA/NASADEM_HGT/001').select('elevation')
+        slope_deg = ee.Terrain.slope(dem)
+        flat_mask = slope_deg.lt(slope_thresh)
+
         is_clearing = (
             vv_change.gte(3.0)
             .And(vv_change.lt(smart_radar_thresh))
@@ -525,6 +539,7 @@ if run_btn:
             .And(ratio_change.gt(0.5))
             .And(is_road.Not())
             .And(persistence_mask)
+            .And(flat_mask)
         )
 
         is_vertical = (
@@ -534,6 +549,7 @@ if run_btn:
             .And(ndvi_after.lt(0.3))
             .And(is_road.Not())
             .And(persistence_mask)
+            .And(flat_mask)
         )
 
         # ----------------------------------------------------------
@@ -658,9 +674,10 @@ if run_btn:
                         self.cell(
                             0, 5,
                             f'Orbit: {orbit_pass} #{dominant_orbit} | '
-                            f'Terrain Correction: {ref_angle_deg}deg ref | '
-                            f'Persistence: {persistence_required}/{after_count} passes | '
-                            f'MMU: {min_area_sqm} sqm',
+                            f'TC: {ref_angle_deg}deg | '
+                            f'Persistence: {persistence_required}/{after_count} | '
+                            f'MMU: {min_area_sqm} sqm | '
+                            f'Slope mask: <{slope_thresh}deg',
                             0, 1, 'C'
                         )
                         self.line(10, 28, 200, 28)
@@ -669,9 +686,11 @@ if run_btn:
                 pdf = PMRDAReport()
 
                 def get_s2_thumb(img, lat, lon, filename):
-                    box = ee.Geometry.Point([lon, lat]).buffer(150)
+                    # 500m buffer gives 1km × 1km spatial context — enough to see
+                    # surrounding land use and confirm the detection makes sense
+                    box = ee.Geometry.Point([lon, lat]).buffer(500)
                     url = img.visualize(bands=['B4', 'B3', 'B2'], min=0, max=3000).getThumbURL({
-                        'region': box, 'dimensions': '300x300', 'format': 'png'
+                        'region': box, 'dimensions': '400x400', 'format': 'png'
                     })
                     urllib.request.urlretrieve(url, filename)
 
@@ -683,34 +702,38 @@ if run_btn:
                     color = (200, 100, 0) if alert_type == 1 else (150, 0, 0)
 
                     pdf.add_page()
-                    pdf.set_font('Courier', 'B', 12)
+                    pdf.set_font('Courier', 'B', 11)
                     pdf.set_text_color(*color)
-                    pdf.cell(0, 10, f"TARGET ID #{idx + 1} of {total_alerts} - {tag}", 0, 1)
+                    pdf.cell(0, 9, f"TARGET ID #{idx + 1} of {total_alerts} - {tag}", 0, 1)
 
                     pdf.set_text_color(0, 0, 0)
-                    pdf.set_font('Courier', '', 10)
-                    pdf.cell(0, 8, f"COORDINATES: {lat_feat:.6f}, {lon_feat:.6f}", 0, 1)
-                    pdf.cell(0, 7, f"ORBIT: {orbit_pass} | RELATIVE ORBIT #{dominant_orbit} | T1 PASSES: {after_count}", 0, 1)
-                    pdf.cell(0, 7, f"PERSISTENCE: {persistence_required}/{after_count} passes confirmed change", 0, 1)
-                    pdf.cell(0, 7, f"MIN MAPPING UNIT: {min_area_sqm} sqm | TERRAIN CORRECTION: {ref_angle_deg}deg ref angle", 0, 1)
+                    pdf.set_font('Courier', '', 9)
+                    pdf.cell(0, 6, f"COORDINATES: {lat_feat:.6f}, {lon_feat:.6f}", 0, 1)
+                    pdf.cell(0, 6, f"ORBIT: {orbit_pass} | RELATIVE ORBIT #{dominant_orbit} | T1 PASSES: {after_count}", 0, 1)
+                    pdf.cell(0, 6, f"PERSISTENCE: {persistence_required}/{after_count} passes | MMU: {min_area_sqm} sqm | SLOPE MASK: <{slope_thresh}deg", 0, 1)
 
                     before_file = f"before_{idx}.png"
                     after_file  = f"after_{idx}.png"
                     get_s2_thumb(s2_before, lat_feat, lon_feat, before_file)
                     get_s2_thumb(s2_after,  lat_feat, lon_feat, after_file)
 
-                    pdf.ln(5)
-                    pdf.set_font('Courier', 'B', 10)
-                    pdf.cell(90, 10, "EPOCH T0 (Sentinel-2 MSI)", 0, 0)
-                    pdf.cell(90, 10, "EPOCH T1 (Sentinel-2 MSI)", 0, 1)
-                    pdf.image(before_file, x=10, w=80)
-                    pdf.image(after_file, x=105, y=pdf.get_y() - 80, w=80)
+                    # --- Row 1: S2 thumbnails side by side (w=70mm each) ---
+                    pdf.ln(3)
+                    pdf.set_font('Courier', 'B', 8)
+                    pdf.cell(95, 7, "EPOCH T0 (Sentinel-2 MSI, 1km context)", 0, 0)
+                    pdf.cell(95, 7, "EPOCH T1 (Sentinel-2 MSI, 1km context)", 0, 1)
+
+                    s2_top_y = pdf.get_y()
+                    pdf.image(before_file, x=10,  y=s2_top_y, w=70)
+                    pdf.image(after_file,  x=105, y=s2_top_y, w=70)
+                    pdf.set_y(s2_top_y + 70 + 4)
                     os.remove(before_file)
                     os.remove(after_file)
 
+                    # --- Row 2: Google Maps high-res centred below ---
                     if gmaps_api_key:
-                        pdf.ln(5)
-                        pdf.cell(0, 10, "OPTICAL VERIFICATION SENSOR (High-Res API):", 0, 1)
+                        pdf.set_font('Courier', 'B', 8)
+                        pdf.cell(0, 7, "OPTICAL VERIFICATION (Google Satellite, zoom 19):", 0, 1)
                         img_url = (
                             f"https://maps.googleapis.com/maps/api/staticmap"
                             f"?center={lat_feat},{lon_feat}&zoom=19&size=500x500"
@@ -722,10 +745,11 @@ if run_btn:
                         if resp.status_code == 200:
                             with open(img_path, 'wb') as f:
                                 f.write(resp.content)
-                            pdf.image(img_path, x=55, w=100)
+                            # Centre the image: A4 usable width ≈ 190mm, image w=85mm → x=62
+                            pdf.image(img_path, x=62, w=85)
                             os.remove(img_path)
                         else:
-                            pdf.cell(0, 10, "[VERIFICATION ERROR: Target acquisition failed]", 0, 1)
+                            pdf.cell(0, 8, "[VERIFICATION ERROR: Target acquisition failed]", 0, 1)
 
                 pdf_output_path = "temp_report_v2.pdf"
                 pdf.output(pdf_output_path)
