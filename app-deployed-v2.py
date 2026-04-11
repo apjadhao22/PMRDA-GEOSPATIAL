@@ -902,12 +902,24 @@ if run_btn:
                         self.set_font('Courier', '', 8)
                         self.cell(0, 5, f'Sector: {selected_location}', 0, 1, 'C')
                         self.cell(0, 5, f'T0: {b_start} to {b_end}   |   T1: {a_start} to {a_end}', 0, 1, 'C')
+                        # Line 3a: Optical detection parameters
                         self.cell(0, 5,
                             safe_pdf_text(
                                 f'Mode: {mode_label} | Cloud: <={cloud_thresh}% | '
                                 f'NDVI loss: >{ndvi_loss_thresh} | NDBI gain: >{ndbi_gain_thresh} | '
                                 f'AOI: {buffer_radius}m | MMU: {min_area_sqm} sqm | '
                                 f'Slope: <{slope_thresh} deg'
+                            ),
+                            0, 1, 'C'
+                        )
+                        # Line 3b: SAR / sensor configuration parameters
+                        _sar_mode_str = 'SAR-Optional ON' if sar_fallback else 'SAR-Required'
+                        self.cell(0, 5,
+                            safe_pdf_text(
+                                f'SAR threshold: {radar_thresh} dB | Orbit: {orbit_pass} | '
+                                f'Persistence: {persistence_required} passes | '
+                                f'Terrain corr: {ref_angle_deg} deg ref | '
+                                f'SAR mode: {_sar_mode_str} | Max polygons: {fetch_limit}'
                             ),
                             0, 1, 'C'
                         )
