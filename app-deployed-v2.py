@@ -80,7 +80,7 @@ st.markdown("---")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Primary Sensor",   "Sentinel-2 MSI (10m)")
 col2.metric("Confirmation",     "SAR C-Band (VV+VH)")
-col3.metric("Detection Logic",  "Optical → SAR Confirm")
+col3.metric("Detection Logic",  "Optical + SAR/Context")
 col4.metric("Cloud Threshold",  "<= 10%")
 st.markdown("---")
 
@@ -514,18 +514,67 @@ if run_btn:
             .And(not_water)
         )
 
-        # -------- 6E. SAR ORBIT LOCKING --------
-        log(f"Fetching Sentinel-1 ({orbit_pass}) and locking orbit number...")
-        before_s1_raw = get_s1_collection(roi, b_start, b_end, orbit_pass)
-        after_s1_raw  = get_s1_collection(roi, a_start, a_end, orbit_pass)
-
-        orbit_numbers  = before_s1_raw.aggregate_array('relativeOrbitNumber_start').getInfo()
-        sar_available  = len(orbit_numbers) > 0
+        # -------- 6E. SAR ORBIT LOCKING (v4 — auto-direction fallback) --------
+        # Root cause of "No SAR data" when switching orbit direction:
+        #   Old code discovered orbits from T0 ONLY. If T0 dominant orbit has
+        #   0 passes in T1 for the chosen direction, sar_available = False with
+        #   no explanation. Also gave no auto-recovery.
+        #
+        # Fix:
+        #   1. Discover orbit numbers from BOTH T0 and T1
+        #   2. Only lock to orbits that appear in BOTH (intersection)
+        #   3. If chosen direction has 0 common orbits, auto-try opposite direction
+        #   4. Emit orbit diagnostic table to log on every run
+        log(f"Fetching Sentinel-1 ({orbit_pass}) — discovering orbits in T0 and T1...")
+        before_s1_raw  = get_s1_collection(roi, b_start, b_end, orbit_pass)
+        after_s1_raw   = get_s1_collection(roi, a_start, a_end, orbit_pass)
+        before_orbits  = before_s1_raw.aggregate_array('relativeOrbitNumber_start').getInfo()
+        after_orbits   = after_s1_raw.aggregate_array('relativeOrbitNumber_start').getInfo()
+        common_orbits  = sorted(set(before_orbits) & set(after_orbits))
+        active_pass    = orbit_pass   # may be updated by auto-fallback below
+        sar_available  = len(common_orbits) > 0
         dominant_orbit = None
         after_count    = 0
 
+        # Emit orbit diagnostic before any decision
+        def _orbit_table(b_list, a_list):
+            all_orbs = sorted(set(b_list) | set(a_list))
+            bc = Counter(b_list); ac = Counter(a_list)
+            rows = [f"  orbit #{o}: T0={bc.get(o,0)} T1={ac.get(o,0)}" for o in all_orbs]
+            return ("\n").join(rows) if rows else "  (none found)"
+
+        log(f"SAR orbit scan [{orbit_pass}]:\n{_orbit_table(before_orbits, after_orbits)}")
+
+        # Auto-fallback: if no common coverage in chosen direction, try opposite
+        if not sar_available and sar_fallback:
+            alt_pass = "ASCENDING" if orbit_pass == "DESCENDING" else "DESCENDING"
+            log(f"No common {orbit_pass} orbits. Auto-trying {alt_pass}...")
+            st.warning(
+                f"No Sentinel-1 **{orbit_pass}** passes with coverage in both T0 and T1. "
+                f"Automatically switching to **{alt_pass}** — re-run with {alt_pass} "
+                f"selected to make this permanent.",
+                icon="🔄"
+            )
+            alt_before = get_s1_collection(roi, b_start, b_end, alt_pass)
+            alt_after  = get_s1_collection(roi, a_start, a_end, alt_pass)
+            alt_b_orbs = alt_before.aggregate_array('relativeOrbitNumber_start').getInfo()
+            alt_a_orbs = alt_after.aggregate_array('relativeOrbitNumber_start').getInfo()
+            alt_common = sorted(set(alt_b_orbs) & set(alt_a_orbs))
+            log(f"SAR orbit scan [{alt_pass}]:\n{_orbit_table(alt_b_orbs, alt_a_orbs)}")
+            if alt_common:
+                before_s1_raw = alt_before
+                after_s1_raw  = alt_after
+                before_orbits = alt_b_orbs
+                after_orbits  = alt_a_orbs
+                common_orbits = alt_common
+                active_pass   = alt_pass
+                sar_available = True
+                log(f"AUTO-FALLBACK SUCCESS: using {alt_pass} orbit(s) {alt_common}")
+
         if sar_available:
-            dominant_orbit = Counter(orbit_numbers).most_common(1)[0][0]
+            # Pick dominant = orbit with most T1 passes among common set
+            t1_counter    = Counter(o for o in after_orbits if o in common_orbits)
+            dominant_orbit = t1_counter.most_common(1)[0][0]
             before_s1_col  = before_s1_raw.filter(
                 ee.Filter.eq('relativeOrbitNumber_start', dominant_orbit)
             )
@@ -534,23 +583,25 @@ if run_btn:
             )
             after_count    = after_s1_col.size().getInfo()
             sar_available  = after_count > 0
-
-        if sar_available:
             log(
-                f"SAR orbit locked: {orbit_pass} #{dominant_orbit} | "
-                f"{after_count} T1 pass(es) available"
+                f"SAR locked: {active_pass} orbit #{dominant_orbit} | "
+                f"T0={Counter(before_orbits)[dominant_orbit]} passes | "
+                f"T1={after_count} passes"
             )
-        else:
+
+        if not sar_available:
             if sar_fallback:
-                log("WARNING: No SAR data. Switching to optical-only mode.")
+                log("WARNING: No SAR data in any orbit direction. Optical-only mode.")
                 st.warning(
-                    "No Sentinel-1 data for this AOI/date range. "
-                    "Running optical-only detection (thresholds tightened automatically)."
+                    "No Sentinel-1 data found for this AOI/date range in either orbit "
+                    "direction. Running optical-only detection (thresholds tightened)."
                 )
             else:
+                b_info = f"T0: {len(before_orbits)} {orbit_pass} passes"
+                a_info = f"T1: {len(after_orbits)} {orbit_pass} passes"
                 st.error(
-                    "No SAR data found and SAR-Optional Mode is OFF. "
-                    "Enable SAR-Optional Mode or try the opposite orbit direction."
+                    f"No SAR data ({b_info} | {a_info}). "
+                    "Enable SAR-Optional Mode or widen the date range."
                 )
                 st.stop()
 
@@ -639,15 +690,32 @@ if run_btn:
                 .And(persistence_mask)
             )
 
-            # CLASS 3  -  OPTICAL ONLY
-            # FIX 2: SAR is now a HARD CO-TRIGGER when SAR data exists.
-            # Optical-only detections had a ~70% false-positive rate on the
-            # Marunji run (Rabi harvest, bare soil) and are suppressed here.
-            # CLASS 3 only activates in the else branch (SAR unavailable).
-            # When SAR is unavailable, clearing/vertical thresholds are
-            # already tightened by 0.05-0.08 to compensate.
-            is_optical_only = ee.Image(0).selfMask()
-            log("SAR co-trigger mode: Optical-Only class suppressed (SAR available).")
+            # CLASS 3  -  OPTICAL ONLY (SAR-unconfirmed construction)
+            # When SAR is available but doesn't confirm, we still allow a
+            # tightly-gated Class 3 for early-stage urban construction that
+            # SAR C-band structurally misses:
+            #   • Flat RCC slab (pre-wall stage)  — no double-bounce yet
+            #   • Metal / polycarbonate sheet roof — specular, reduces VV
+            #   • Single-storey low structures     — below double-bounce threshold
+            #
+            # Gate 1: tighter optical thresholds (+0.06 on both)
+            # Gate 2: NDBI_BASELINE > 0.05 — must be inside existing built-up
+            #         area, not a crop field going dry (kills Rabi FP noise)
+            # Gate 3: NOT already in SAR-confirmed classes
+            # Gate 4: NOT a road
+            ndbi_before = compute_indices(s2_before)['ndbi']
+            is_builtup_context = ndbi_before.gt(0.05)
+
+            is_optical_only = (
+                optical_trigger
+                .And(is_clearing.Not())
+                .And(is_vertical.Not())
+                .And(is_road.Not())
+                .And(is_builtup_context)
+                .And(ndvi_loss.gt(ndvi_loss_thresh + 0.06))
+                .And(ndbi_gain.gt(ndbi_gain_thresh + 0.06))
+            )
+            log("Class 3 (Optical-Only) active with built-up context guard + tightened thresholds.")
 
         else:
             # SAR unavailable  -  optical-only fallback
