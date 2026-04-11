@@ -1,8 +1,50 @@
-streamlit
+# ============================================================
+# PMRDA Construction Monitor — requirements.txt
+# Python 3.10 / Streamlit Cloud deployment
+# ============================================================
+
+# --- Core app framework ---
+streamlit>=1.35.0,<2.0.0
+
+# --- Earth Engine stack (order matters — pin EE API explicitly) ---
+# geemap 0.35.0 requires earthengine-api>=1.0.0 and folium>=0.17.0
+# Pin EE API here so geemap cannot silently upgrade it to a breaking version
+earthengine-api>=1.0.0,<2.0.0
 geemap==0.35.0
-osmnx
-fpdf
-requests
+folium>=0.17.0,<1.0.0
+
+# --- Map rendering in Streamlit ---
+# Map.to_streamlit() calls streamlit_folium internally.
+# geemap lists this as an OPTIONAL extra, not a hard dep — must add explicitly.
+streamlit-folium>=0.15.0
+
+# --- Google Auth (service account credentials for EE on Streamlit Cloud) ---
+# Without this explicit pin, cold-start deploys fail with ImportError on
+# google.oauth2.service_account even though google-auth is a transitive dep
+google-auth>=2.29.0,<3.0.0
+
+# --- Geospatial data ---
+# osmnx 2.0 (Nov 2024) has BREAKING API CHANGES from v1.
+# The app uses v1 API (features_from_point signature).
+# Pin to <2.0.0 until the code is migrated.
+osmnx>=1.9.0,<2.0.0
+
+# --- PDF generation ---
+# IMPORTANT: use fpdf2, NOT fpdf.
+# 'fpdf' on PyPI is v1.7.2 — abandoned, uses dest='S' output syntax.
+# 'fpdf2' is the maintained fork — same 'from fpdf import FPDF' import,
+# but output() returns bytes directly: bytes(pdf.output()) not pdf.output(dest='S')
+fpdf2>=2.7.0,<3.0.0
+
+# --- HTTP + data ---
+requests>=2.31.0
+pandas>=2.0.0,<3.0.0
+
+# --- Dependency pins to prevent breakage ---
+# setuptools >=70.0 removed pkg_resources APIs used by older deps
 setuptools<70.0.0
+# ipython pinned — geemap notebook utilities pull ipython;
+# 8.12.x is the last version compatible with Python 3.8/3.9/3.10 environments
 ipython==8.12.3
+# python-box 7.0 changed dot-notation access breaking st.secrets usage pattern
 python-box<7.0.0
