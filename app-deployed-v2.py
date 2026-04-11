@@ -639,18 +639,15 @@ if run_btn:
                 .And(persistence_mask)
             )
 
-            # CLASS 3  -  OPTICAL ONLY (SAR inconclusive)
-            # Strong optical signal but SAR doesn't confirm clearly.
-            # Catches: metal sheet structures (low SAR), flat slabs, RCC slabs.
-            # Uses tighter optical thresholds since no SAR confirmation.
-            is_optical_only = (
-                optical_trigger
-                .And(is_clearing.Not())
-                .And(is_vertical.Not())
-                .And(is_road.Not())
-                .And(ndvi_loss.gt(ndvi_loss_thresh + 0.05))
-                .And(ndbi_gain.gt(ndbi_gain_thresh + 0.05))
-            )
+            # CLASS 3  -  OPTICAL ONLY
+            # FIX 2: SAR is now a HARD CO-TRIGGER when SAR data exists.
+            # Optical-only detections had a ~70% false-positive rate on the
+            # Marunji run (Rabi harvest, bare soil) and are suppressed here.
+            # CLASS 3 only activates in the else branch (SAR unavailable).
+            # When SAR is unavailable, clearing/vertical thresholds are
+            # already tightened by 0.05-0.08 to compensate.
+            is_optical_only = ee.Image(0).selfMask()
+            log("SAR co-trigger mode: Optical-Only class suppressed (SAR available).")
 
         else:
             # SAR unavailable  -  optical-only fallback
@@ -810,6 +807,15 @@ if run_btn:
 
             all_vectors = clearing_vec.merge(vertical_vec).merge(optical_vec)
 
+            # FIX 1 — MMU post-vectorisation guard.
+            # 'count' is set by ee.Reducer.countEvery() inside extract_polygons.
+            # Each pixel = 100 sqm, so min count = min_area_sqm / 100.
+            # This catches fragments that slip past connectedPixelCount (known
+            # GEE edge case when polygon dissolve produces isolated remnants).
+            all_vectors = all_vectors.filter(
+                ee.Filter.gte('count', max(1, min_area_sqm // 100))
+            )
+
             try:
                 vector_data = all_vectors.getInfo()
             except Exception as e:
@@ -938,7 +944,7 @@ if run_btn:
                     label       = props.get('alert_label', 'Unknown')
 
                     # Image chips in UI
-                    col_a, col_b = st.columns(2)
+                    col_a, col_b, col_c = st.columns(3)
                     url_before, url_after = None, None
                     try:
                         url_before = get_s2_thumb_url(s2_before, cy, cx)
@@ -956,35 +962,87 @@ if run_btn:
                     except Exception as e:
                         col_a.warning(f"Image chip unavailable: {e}")
 
+                    # Google Static Maps satellite chip in UI (3rd column)
+                    try:
+                        if gmaps_api_key:
+                            sat_ui_url = (
+                                f"https://maps.googleapis.com/maps/api/staticmap"
+                                f"?center={cy},{cx}&zoom=18&size=320x320"
+                                f"&maptype=satellite&key={gmaps_api_key}"
+                            )
+                            col_c.image(
+                                sat_ui_url,
+                                caption=f"DET-{i+1:03d} GOOGLE SAT (zoom 18)",
+                                use_container_width=True
+                            )
+                        else:
+                            col_c.caption("Google Satellite: API key not configured.")
+                    except Exception:
+                        col_c.caption("Google Satellite: unavailable.")
+
                     # PDF page per detection
                     pdf.add_page()
                     pdf.set_font('Courier', 'B', 11)
                     pdf.cell(0, 7, safe_pdf_text(f'DETECTION DET-{i+1:03d} - {label.upper()}'), 0, 1)
                     pdf.set_font('Courier', '', 9)
                     pdf.cell(0, 5, f'Coordinates: {cy:.5f}N,  {cx:.5f}E', 0, 1)
-                    pdf.cell(0, 5, f'Estimated Area: ~{area_sqm:,} sqm  ({pixel_count} pixels at 100 sqm each)', 0, 1)
+                    _pword = 'pixel' if pixel_count == 1 else 'pixels'
+                    pdf.cell(0, 5, f'Estimated Area: ~{area_sqm:,} sqm  ({pixel_count} {_pword} at 100 sqm each)', 0, 1)
                     pdf.cell(0, 5, f'Detection Period: {a_start} to {a_end}', 0, 1)
                     pdf.cell(0, 5, f'Baseline Period:  {b_start} to {b_end}', 0, 1)
                     pdf.ln(4)
 
-                    # Download and embed image chips in PDF
+                    # Download and embed image chips in PDF (3 columns)
+                    # Layout: T0 Sentinel-2  |  T1 Sentinel-2  |  Google Satellite
+                    # A4 content width = 190mm. 3 x 60mm images + gaps fits cleanly.
+                    # x positions: 10, 72, 134  |  widths: 60mm each
                     try:
                         before_path = f"/tmp/pmrda_before_{i}.png"
                         after_path  = f"/tmp/pmrda_after_{i}.png"
+                        sat_path    = f"/tmp/pmrda_sat_{i}.jpg"
+                        sat_url_pdf = None
+
                         if url_before:
                             urllib.request.urlretrieve(url_before, before_path)
                         if url_after:
-                            urllib.request.urlretrieve(url_after,  after_path)
+                            urllib.request.urlretrieve(url_after, after_path)
+
+                        # Fetch Google Static Maps satellite image
+                        if gmaps_api_key:
+                            sat_url_pdf = (
+                                f"https://maps.googleapis.com/maps/api/staticmap"
+                                f"?center={cy},{cx}&zoom=18&size=320x320"
+                                f"&maptype=satellite&key={gmaps_api_key}"
+                            )
+                            try:
+                                urllib.request.urlretrieve(sat_url_pdf, sat_path)
+                            except Exception:
+                                sat_path = None
+                        else:
+                            sat_path = None
 
                         y_pos = pdf.get_y()
-                        pdf.set_font('Courier', '', 8)
-                        pdf.cell(95, 5, 'BASELINE (T0)', 0, 0, 'C')
-                        pdf.cell(95, 5, 'CURRENT STATE (T1)', 0, 1, 'C')
+                        pdf.set_font('Courier', 'B', 7)
+                        pdf.cell(63, 5, 'BASELINE (T0)', 0, 0, 'C')
+                        pdf.cell(63, 5, 'CURRENT STATE (T1)', 0, 0, 'C')
+                        pdf.cell(63, 5, 'GOOGLE SATELLITE (z18)', 0, 1, 'C')
+
+                        # Place all 3 images side-by-side at y_pos+6
+                        img_y = y_pos + 6
                         if url_before and os.path.exists(before_path):
-                            pdf.image(before_path, x=10,  y=None, w=87)
-                        if url_after  and os.path.exists(after_path):
-                            pdf.set_xy(108, y_pos + 6)
-                            pdf.image(after_path,  x=108, y=None, w=87)
+                            pdf.image(before_path, x=10,  y=img_y, w=60)
+                        if url_after and os.path.exists(after_path):
+                            pdf.image(after_path,  x=72,  y=img_y, w=60)
+                        if sat_path and os.path.exists(sat_path):
+                            pdf.image(sat_path,    x=134, y=img_y, w=60)
+                        elif not gmaps_api_key:
+                            pdf.set_xy(134, img_y)
+                            pdf.set_font('Courier', '', 7)
+                            pdf.multi_cell(60, 4, '[Google Satellite: no API key configured]')
+
+                        # Advance cursor past the images (approx 48mm = 60mm * 320/400 aspect)
+                        pdf.set_y(img_y + 48)
+
                     except Exception:
                         pdf.cell(0, 5, '[Image chips unavailable]', 0, 1)
 
