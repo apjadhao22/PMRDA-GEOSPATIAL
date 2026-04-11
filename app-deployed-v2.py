@@ -963,51 +963,312 @@ if run_btn:
                     })
 
                 # PDF Report class
+                # ============================================================
+                # PDF REPORT — Professional redesign
+                # Layout:
+                #   Page 1 : Cover / Summary (params table + detection register)
+                #   Pages 2+: One page per detection
+                #             - Class-coloured header bar
+                #             - Metrics table
+                #             - T0 | T1 Sentinel-2 side-by-side (top)
+                #             - Google Satellite full-width (bottom)
+                #             - Detection basis footnote
+                # ============================================================
+
+                # ---- Colour palette (RGB tuples) ----
+                C_NAVY   = (15,  37,  84)
+                C_TEAL   = (0,  140, 140)
+                C_WHITE  = (255, 255, 255)
+                C_BLACK  = (0,   0,   0)
+                C_LGREY  = (245, 245, 245)
+                C_MGREY  = (200, 200, 200)
+                C_DGREY  = (100, 100, 100)
+                C_ORANGE = (210,  90,   0)   # Land Clearing
+                C_RED    = (180,  25,  25)   # Vertical Structure
+                C_BLUE   = ( 30, 100, 200)   # Optical Only
+                CLASS_COLOR = {1: C_ORANGE, 2: C_RED, 3: C_BLUE}
+                CLASS_LABEL = {1: 'LAND CLEARING', 2: 'VERTICAL STRUCTURE', 3: 'OPTICAL ONLY'}
+
+                # ---- Resolved orbit label (survives auto-fallback) ----
+                _rpt_orbit = active_pass if 'active_pass' in dir() else orbit_pass
+                _rpt_orbit_num = str(dominant_orbit) if dominant_orbit else 'n/a'
+                _rpt_sar_mode  = 'Optional (fallback ON)' if sar_fallback else 'Required'
+                _rpt_t1_passes = str(after_count) if after_count else 'n/a'
+
                 class PMRDAReport(FPDF):
+
+                    # ------ helpers ------
+                    def _fill(self, rgb):
+                        self.set_fill_color(*rgb)
+
+                    def _text(self, rgb):
+                        self.set_text_color(*rgb)
+
+                    def _draw(self, rgb):
+                        self.set_draw_color(*rgb)
+
+                    def section_bar(self, title):
+                        """Navy section header bar — full content width."""
+                        self._fill(C_NAVY); self._text(C_WHITE)
+                        self.set_font('Courier', 'B', 8)
+                        self.cell(190, 7, f'  {safe_pdf_text(title)}', 0, 1, 'L', fill=True)
+                        self._fill(C_WHITE); self._text(C_BLACK)
+                        self.ln(1)
+
+                    def two_col_kv(self, rows, lw=88, rw=102):
+                        """Alternating-row key/value table."""
+                        self._draw(C_MGREY)
+                        self.set_line_width(0.2)
+                        for idx, (k, v) in enumerate(rows):
+                            bg = C_LGREY if idx % 2 == 0 else C_WHITE
+                            self._fill(bg)
+                            self.set_font('Courier', '', 8)
+                            self._text(C_DGREY)
+                            self.cell(lw, 6, f'  {safe_pdf_text(str(k))}', 'LB', 0, 'L', fill=True)
+                            self.set_font('Courier', 'B', 8)
+                            self._text(C_BLACK)
+                            self.cell(rw, 6, f'  {safe_pdf_text(str(v))}', 'RB', 1, 'L', fill=True)
+                        self._fill(C_WHITE); self._text(C_BLACK)
+                        self._draw(C_BLACK); self.set_line_width(0.2)
+
+                    def table_header_row(self, cols, widths):
+                        """Dark-navy table column headers."""
+                        self._fill(C_NAVY); self._text(C_WHITE)
+                        self.set_font('Courier', 'B', 7)
+                        for col, w in zip(cols, widths):
+                            self.cell(w, 7, f' {col}', 0, 0, 'L', fill=True)
+                        self.ln()
+                        self._fill(C_WHITE); self._text(C_BLACK)
+
+                    def img_label_bar(self, label, x, w, y):
+                        """Teal label strip above each image."""
+                        self._fill(C_TEAL); self._text(C_WHITE)
+                        self.set_font('Courier', 'B', 7)
+                        self.set_xy(x, y)
+                        self.cell(w, 5, f' {label}', 0, 0, 'L', fill=True)
+                        self._fill(C_WHITE); self._text(C_BLACK)
+
+                    def placeholder_box(self, x, y, w, h, msg):
+                        """Grey bordered placeholder when image unavailable."""
+                        self._draw(C_MGREY); self._fill(C_LGREY)
+                        self.set_line_width(0.3)
+                        self.rect(x, y, w, h, 'FD')
+                        self.set_font('Courier', '', 7)
+                        self._text(C_DGREY)
+                        self.set_xy(x, y + h/2 - 3)
+                        self.cell(w, 4, safe_pdf_text(msg), 0, 1, 'C')
+                        self._draw(C_BLACK); self._fill(C_WHITE)
+                        self._text(C_BLACK); self.set_line_width(0.2)
+
+                    # ------ header / footer ------
                     def header(self):
-                        self.set_font('Courier', 'B', 13)
-                        self.cell(0, 8, safe_pdf_text('GEOSPATIAL CHANGE DETECTION REPORT - PMRDA v3'), 0, 1, 'C')
-                        self.set_font('Courier', '', 8)
-                        self.cell(0, 5, f'Sector: {selected_location}', 0, 1, 'C')
-                        self.cell(0, 5, f'T0: {b_start} to {b_end}   |   T1: {a_start} to {a_end}', 0, 1, 'C')
-                        # Line 3a: Optical detection parameters
-                        self.cell(0, 5,
-                            safe_pdf_text(
-                                f'Mode: {mode_label} | Cloud: <={cloud_thresh}% | '
-                                f'NDVI loss: >{ndvi_loss_thresh} | NDBI gain: >{ndbi_gain_thresh} | '
-                                f'AOI: {buffer_radius}m | MMU: {min_area_sqm} sqm | '
-                                f'Slope: <{slope_thresh} deg'
-                            ),
-                            0, 1, 'C'
-                        )
-                        # Line 3b: SAR / sensor configuration parameters
-                        _sar_mode_str = 'SAR-Optional ON' if sar_fallback else 'SAR-Required'
-                        self.cell(0, 5,
-                            safe_pdf_text(
-                                f'SAR threshold: {radar_thresh} dB | Orbit: {orbit_pass} | '
-                                f'Persistence: {persistence_required} passes | '
-                                f'Terrain corr: {ref_angle_deg} deg ref | '
-                                f'SAR mode: {_sar_mode_str} | Max polygons: {fetch_limit}'
-                            ),
-                            0, 1, 'C'
-                        )
-                        y = self.get_y() + 2
-                        self.line(10, y, 200, y)
-                        self.ln(8)
+                        if self.page_no() == 1:
+                            return   # Cover page has its own title block
+                        self._fill(C_NAVY); self._text(C_WHITE)
+                        self.set_font('Courier', 'B', 7)
+                        loc_short = safe_pdf_text(selected_location.split('[')[0].strip())
+                        self.cell(140, 6,
+                            f'  PMRDA | {loc_short} | T1: {a_start} to {a_end}',
+                            0, 0, 'L', fill=True)
+                        self.set_font('Courier', '', 7)
+                        self.cell(50, 6,
+                            f'Page {self.page_no()}  ',
+                            0, 1, 'R', fill=True)
+                        self._fill(C_WHITE); self._text(C_BLACK)
+                        self.ln(2)
 
                     def footer(self):
                         self.set_y(-12)
-                        self.set_font('Courier', '', 7)
-                        self.cell(0, 5,
+                        self._draw(C_TEAL); self.set_line_width(0.5)
+                        self.line(10, self.get_y(), 200, self.get_y())
+                        self.set_line_width(0.2); self._draw(C_BLACK)
+                        self.ln(1)
+                        self.set_font('Courier', '', 6)
+                        self._text(C_DGREY)
+                        self.cell(0, 4, safe_pdf_text(
                             f'Generated {datetime.date.today()} | '
-                            f'{n_total} detections | Sentinel-2 L2A + Sentinel-1 IW GRD | '
-                            f'Google Earth Engine | Page {self.page_no()}',
-                            0, 0, 'C'
-                        )
+                            f'PMRDA Geospatial Intelligence Portal v3 | '
+                            f'Sentinel-2 L2A + Sentinel-1 IW GRD via Google Earth Engine | '
+                            f'FOR OFFICIAL USE ONLY — Field verification required before enforcement.'
+                        ), 0, 1, 'C')
+                        self._text(C_BLACK)
 
+                # ---- instantiate ----
                 pdf = PMRDAReport()
-                pdf.set_auto_page_break(auto=True, margin=15)
+                pdf.set_auto_page_break(auto=True, margin=14)
+                pdf.set_margins(10, 10, 10)
 
+                # ================================================================
+                # PAGE 1 — COVER / SUMMARY
+                # ================================================================
+                pdf.add_page()
+
+                # Title block — full-width navy
+                pdf._fill(C_NAVY); pdf._text(C_WHITE)
+                pdf.set_font('Courier', 'B', 15)
+                pdf.cell(190, 11,
+                    'PMRDA GEOSPATIAL INTELLIGENCE PORTAL', 0, 1, 'C', fill=True)
+                pdf.set_font('Courier', 'B', 10)
+                pdf.cell(190, 8,
+                    'ILLEGAL CONSTRUCTION DETECTION REPORT', 0, 1, 'C', fill=True)
+                pdf._fill(C_TEAL)
+                pdf.set_font('Courier', 'B', 9)
+                pdf.cell(190, 7,
+                    safe_pdf_text(f'  Sector: {selected_location}'), 0, 1, 'L', fill=True)
+                pdf._fill(C_NAVY)
+                pdf.set_font('Courier', '', 7)
+                pdf.cell(190, 5,
+                    safe_pdf_text(
+                        f'  Classification: FOR OFFICIAL USE ONLY  |  '
+                        f'System: Optical-Primary Multi-Temporal Fusion Engine v3  |  '
+                        f'Generated: {datetime.date.today()}'
+                    ), 0, 1, 'L', fill=True)
+                pdf._fill(C_WHITE); pdf._text(C_BLACK)
+                pdf.ln(5)
+
+                # ---- Two-column summary: Temporal | Detection counts ----
+                y_sum = pdf.get_y()
+
+                # Left column header (Temporal Coverage)
+                pdf._fill(C_TEAL); pdf._text(C_WHITE)
+                pdf.set_font('Courier', 'B', 8)
+                pdf.cell(93, 7, '  TEMPORAL COVERAGE', 0, 0, 'L', fill=True)
+
+                # Right column header (Detection Summary)
+                pdf.cell(97, 7, '  DETECTION SUMMARY', 0, 1, 'L', fill=True)
+                pdf._fill(C_WHITE); pdf._text(C_BLACK)
+
+                # Left kv rows (temporal)
+                temporal_rows = [
+                    ('T0 Baseline Start',  b_start),
+                    ('T0 Baseline End',    b_end),
+                    ('T1 Detection Start', a_start),
+                    ('T1 Detection End',   a_end),
+                    ('Mode',               safe_pdf_text(mode_label)),
+                    ('AOI Radius',         f'{buffer_radius} m'),
+                ]
+                y_kv = pdf.get_y()
+                for idx, (k, v) in enumerate(temporal_rows):
+                    bg = C_LGREY if idx % 2 == 0 else C_WHITE
+                    pdf._fill(bg)
+                    pdf.set_font('Courier', '', 7)
+                    pdf._text(C_DGREY)
+                    pdf.cell(55, 5.5, f'  {k}', 'LB', 0, 'L', fill=True)
+                    pdf.set_font('Courier', 'B', 7)
+                    pdf._text(C_BLACK)
+                    pdf.cell(38, 5.5, f'  {v}', 'RB', 1, 'L', fill=True)
+
+                # Right column — detection counts (go back up to y_kv)
+                _det_rows = [
+                    ('Total Detections',     str(n_total)),
+                    ('Land Clearing',        str(n_clearing)),
+                    ('Vertical Structure',   str(n_vertical)),
+                    ('Optical Only',         str(n_optical)),
+                    ('Total Flagged Area',   f'{sum(r["Area (sqm)"] for r in rows):,} sqm'),
+                    ('SAR Confirmation',     'YES' if sar_available else 'OPTICAL-ONLY'),
+                ]
+                for idx, (k, v) in enumerate(_det_rows):
+                    bg = C_LGREY if idx % 2 == 0 else C_WHITE
+                    pdf._fill(bg)
+                    pdf.set_font('Courier', '', 7)
+                    pdf._text(C_DGREY)
+                    pdf.set_xy(103, y_kv + idx * 5.5)
+                    pdf.cell(57, 5.5, f'  {k}', 'LB', 0, 'L', fill=True)
+                    pdf.set_font('Courier', 'B', 7)
+                    pdf._text(C_BLACK)
+                    _v_color = C_RED if (k == 'Total Detections' and n_total > 0) else C_BLACK
+                    pdf._text(_v_color)
+                    pdf.cell(40, 5.5, f'  {v}', 'RB', 0, 'L', fill=True)
+                    pdf._text(C_BLACK)
+                pdf.set_y(y_kv + len(_det_rows) * 5.5 + 1)
+
+                pdf.ln(5)
+
+                # ---- Pipeline Parameters — two-column layout ----
+                pdf.section_bar('PIPELINE PARAMETERS')
+
+                _opt_rows = [
+                    ('NDVI Loss Threshold',   f'> {ndvi_loss_thresh}'),
+                    ('NDBI Gain Threshold',   f'> {ndbi_gain_thresh}'),
+                    ('Max Cloud Cover',       f'<= {cloud_thresh}%'),
+                    ('Min Alert Area (MMU)',  f'{min_area_sqm} sqm'),
+                    ('Max Detection Slope',   f'< {slope_thresh} deg'),
+                    ('Cloud Mask Method',     'SCL per-pixel (L2A)'),
+                ]
+                _sar_rows = [
+                    ('SAR Threshold',         f'{radar_thresh} dB'),
+                    ('Orbit Direction',       _rpt_orbit),
+                    ('Locked Orbit No.',      f'#{_rpt_orbit_num}'),
+                    ('Temporal Persistence',  f'{persistence_required} pass(es) of {_rpt_t1_passes}'),
+                    ('Terrain Correction',    f'{ref_angle_deg} deg reference angle'),
+                    ('SAR Mode',              _rpt_sar_mode),
+                    ('Max Output Polygons',   str(fetch_limit)),
+                ]
+
+                # Column headers
+                pdf._fill(C_TEAL); pdf._text(C_WHITE)
+                pdf.set_font('Courier', 'B', 8)
+                pdf.cell(95, 6, '  OPTICAL DETECTION (PRIMARY)', 0, 0, 'L', fill=True)
+                pdf.cell(95, 6, '  SAR CONFIRMATION (SECONDARY)', 0, 1, 'L', fill=True)
+                pdf._fill(C_WHITE); pdf._text(C_BLACK)
+
+                _param_y = pdf.get_y()
+                _max_rows = max(len(_opt_rows), len(_sar_rows))
+                for idx in range(_max_rows):
+                    bg = C_LGREY if idx % 2 == 0 else C_WHITE
+                    pdf._fill(bg)
+                    # Optical column (left)
+                    if idx < len(_opt_rows):
+                        k, v = _opt_rows[idx]
+                        pdf.set_font('Courier', '', 7); pdf._text(C_DGREY)
+                        pdf.cell(52, 5.5, f'  {k}', 'LB', 0, 'L', fill=True)
+                        pdf.set_font('Courier', 'B', 7); pdf._text(C_BLACK)
+                        pdf.cell(43, 5.5, f'  {v}', 'RB', 0, 'L', fill=True)
+                    else:
+                        pdf.cell(95, 5.5, '', 'LRB', 0, 'L', fill=True)
+                    # SAR column (right)
+                    if idx < len(_sar_rows):
+                        k, v = _sar_rows[idx]
+                        pdf.set_font('Courier', '', 7); pdf._text(C_DGREY)
+                        pdf.cell(52, 5.5, f'  {k}', 'LB', 0, 'L', fill=True)
+                        pdf.set_font('Courier', 'B', 7); pdf._text(C_BLACK)
+                        pdf.cell(43, 5.5, f'  {v}', 'RB', 1, 'L', fill=True)
+                    else:
+                        pdf.cell(95, 5.5, '', 'LRB', 1, 'L', fill=True)
+
+                pdf._fill(C_WHITE); pdf._text(C_BLACK)
+                pdf.ln(5)
+
+                # ---- Detection Register Table ----
+                pdf.section_bar('DETECTION REGISTER')
+                _reg_cols  = ['ID',  'CLASS',             'LATITUDE',   'LONGITUDE',  'AREA (sqm)', 'PIXELS', 'SAR']
+                _reg_widths = [18,    55,                  28,           28,           28,           18,       15]
+                pdf.table_header_row(_reg_cols, _reg_widths)
+
+                for idx, row in enumerate(rows):
+                    c_idx = row.get('Class', 0)
+                    bg = C_LGREY if idx % 2 == 0 else C_WHITE
+                    pdf._fill(bg)
+                    pdf.set_font('Courier', '', 7)
+                    _vals = [
+                        row['ID'],
+                        CLASS_LABEL.get(c_idx, row['Type']),
+                        f"{row['Lat']:.5f} N",
+                        f"{row['Lon']:.5f} E",
+                        f"{row['Area (sqm)']:,}",
+                        str(row['Pixels']),
+                        'YES' if sar_available else 'NO',
+                    ]
+                    for val, w in zip(_vals, _reg_widths):
+                        pdf._text(CLASS_COLOR.get(c_idx, C_BLACK) if val == CLASS_LABEL.get(c_idx, '') else C_BLACK)
+                        pdf.cell(w, 5.5, f' {safe_pdf_text(str(val))}', 'B', 0, 'L', fill=True)
+                    pdf._text(C_BLACK)
+                    pdf.ln()
+                pdf._fill(C_WHITE)
+
+                # ================================================================
+                # PAGES 2+ — ONE PAGE PER DETECTION
+                # ================================================================
                 for i, feat in enumerate(features[:min(fetch_limit, n_total)]):
                     props  = feat.get('properties', {})
                     geom   = feat.get('geometry',   {})
@@ -1021,127 +1282,169 @@ if run_btn:
 
                     pixel_count = props.get('count', 0)
                     area_sqm    = pixel_count * 100
+                    alert_type  = props.get('alert_type', 0)
                     label       = props.get('alert_label', 'Unknown')
+                    class_color = CLASS_COLOR.get(alert_type, C_NAVY)
+                    _pword      = 'pixel' if pixel_count == 1 else 'pixels'
 
-                    # Image chips in UI
+                    # ---- Image chips in Streamlit UI ----
                     col_a, col_b, col_c = st.columns(3)
                     url_before, url_after = None, None
                     try:
                         url_before = get_s2_thumb_url(s2_before, cy, cx)
                         url_after  = get_s2_thumb_url(s2_after,  cy, cx)
-                        col_a.image(
-                            url_before,
-                            caption=f"DET-{i+1:03d} BEFORE ({b_start})",
-                            use_container_width=True
-                        )
-                        col_b.image(
-                            url_after,
-                            caption=f"DET-{i+1:03d} AFTER ({a_end}) | {label} | ~{area_sqm} sqm",
-                            use_container_width=True
-                        )
+                        col_a.image(url_before,
+                            caption=f"DET-{i+1:03d} T0 BASELINE ({b_start} to {b_end})",
+                            use_container_width=True)
+                        col_b.image(url_after,
+                            caption=f"DET-{i+1:03d} T1 CHANGE ({a_start} to {a_end}) | {label} | ~{area_sqm} sqm",
+                            use_container_width=True)
                     except Exception as e:
-                        col_a.warning(f"Image chip unavailable: {e}")
+                        col_a.warning(f"Sentinel-2 chip unavailable: {e}")
 
-                    # Google Static Maps satellite chip in UI (3rd column)
                     try:
                         if gmaps_api_key:
-                            sat_ui_url = (
+                            col_c.image(
                                 f"https://maps.googleapis.com/maps/api/staticmap"
                                 f"?center={cy},{cx}&zoom=18&size=320x320"
-                                f"&maptype=satellite&key={gmaps_api_key}"
-                            )
-                            col_c.image(
-                                sat_ui_url,
-                                caption=f"DET-{i+1:03d} GOOGLE SAT (zoom 18)",
-                                use_container_width=True
-                            )
+                                f"&maptype=satellite&key={gmaps_api_key}",
+                                caption=f"DET-{i+1:03d} Google Satellite (zoom 18)",
+                                use_container_width=True)
                         else:
                             col_c.caption("Google Satellite: API key not configured.")
                     except Exception:
                         col_c.caption("Google Satellite: unavailable.")
 
-                    # PDF page per detection
-                    pdf.add_page()
-                    pdf.set_font('Courier', 'B', 11)
-                    pdf.cell(0, 7, safe_pdf_text(f'DETECTION DET-{i+1:03d} - {label.upper()}'), 0, 1)
-                    pdf.set_font('Courier', '', 9)
-                    pdf.cell(0, 5, f'Coordinates: {cy:.5f}N,  {cx:.5f}E', 0, 1)
-                    _pword = 'pixel' if pixel_count == 1 else 'pixels'
-                    pdf.cell(0, 5, f'Estimated Area: ~{area_sqm:,} sqm  ({pixel_count} {_pword} at 100 sqm each)', 0, 1)
-                    pdf.cell(0, 5, f'Detection Period: {a_start} to {a_end}', 0, 1)
-                    pdf.cell(0, 5, f'Baseline Period:  {b_start} to {b_end}', 0, 1)
-                    pdf.ln(4)
+                    # ---- Fetch images for PDF ----
+                    before_path = f"/tmp/pmrda_before_{i}.png"
+                    after_path  = f"/tmp/pmrda_after_{i}.png"
+                    sat_path    = None
 
-                    # Download and embed image chips in PDF (3 columns)
-                    # Layout: T0 Sentinel-2  |  T1 Sentinel-2  |  Google Satellite
-                    # A4 content width = 190mm. 3 x 60mm images + gaps fits cleanly.
-                    # x positions: 10, 72, 134  |  widths: 60mm each
                     try:
-                        before_path = f"/tmp/pmrda_before_{i}.png"
-                        after_path  = f"/tmp/pmrda_after_{i}.png"
-                        sat_path    = f"/tmp/pmrda_sat_{i}.jpg"
-                        sat_url_pdf = None
+                        if url_before: urllib.request.urlretrieve(url_before, before_path)
+                        if url_after:  urllib.request.urlretrieve(url_after,  after_path)
+                    except Exception as _e:
+                        log(f"Sentinel chip download error: {_e}")
 
-                        if url_before:
-                            urllib.request.urlretrieve(url_before, before_path)
-                        if url_after:
-                            urllib.request.urlretrieve(url_after, after_path)
+                    if gmaps_api_key:
+                        # 640x320 = 2:1 aspect → renders as 180mm × 90mm in PDF
+                        _sat_url = (
+                            f"https://maps.googleapis.com/maps/api/staticmap"
+                            f"?center={cy},{cx}&zoom=18&size=640x320"
+                            f"&maptype=satellite&format=png&key={gmaps_api_key}"
+                        )
+                        try:
+                            _r = requests.get(_sat_url, timeout=12)
+                            _ct = _r.headers.get('content-type', '')
+                            if _r.status_code == 200 and 'image' in _ct and len(_r.content) > 5000:
+                                sat_path = f"/tmp/pmrda_sat_{i}.png"
+                                with open(sat_path, 'wb') as _f:
+                                    _f.write(_r.content)
+                            else:
+                                log(f"Google Sat DET-{i+1:03d}: HTTP {_r.status_code} ct={_ct} sz={len(_r.content)}")
+                        except Exception as _e:
+                            log(f"Google Sat DET-{i+1:03d} error: {_e}")
 
-                        # Fetch Google Static Maps satellite image
-                        if gmaps_api_key:
-                            sat_url_pdf = (
-                                f"https://maps.googleapis.com/maps/api/staticmap"
-                                f"?center={cy},{cx}&zoom=18&size=320x320"
-                                f"&maptype=satellite&key={gmaps_api_key}"
-                            )
-                            try:
-                                urllib.request.urlretrieve(sat_url_pdf, sat_path)
-                            except Exception:
-                                sat_path = None
-                        else:
-                            sat_path = None
+                    # ==============================================================
+                    # PDF PAGE — Detection evidence
+                    # ==============================================================
+                    pdf.add_page()
 
-                        y_pos = pdf.get_y()
-                        pdf.set_font('Courier', 'B', 7)
-                        pdf.cell(63, 5, 'BASELINE (T0)', 0, 0, 'C')
-                        pdf.cell(63, 5, 'CURRENT STATE (T1)', 0, 0, 'C')
-                        pdf.cell(63, 5, 'GOOGLE SATELLITE (z18)', 0, 1, 'C')
+                    # ---- Detection class banner ----
+                    pdf._fill(class_color); pdf._text(C_WHITE)
+                    pdf.set_font('Courier', 'B', 12)
+                    pdf.cell(130, 10,
+                        safe_pdf_text(f'  DET-{i+1:03d}  |  {CLASS_LABEL.get(alert_type, label.upper())}'),
+                        0, 0, 'L', fill=True)
+                    pdf.set_font('Courier', '', 8)
+                    pdf.cell(60, 10,
+                        f'  {cy:.5f} N  {cx:.5f} E',
+                        0, 1, 'R', fill=True)
+                    pdf._fill(C_WHITE); pdf._text(C_BLACK)
+                    pdf.ln(3)
 
-                        # Place all 3 images side-by-side at y_pos+6
-                        img_y = y_pos + 6
-                        if url_before and os.path.exists(before_path):
-                            pdf.image(before_path, x=10,  y=img_y, w=60)
-                        if url_after and os.path.exists(after_path):
-                            pdf.image(after_path,  x=72,  y=img_y, w=60)
-                        if sat_path and os.path.exists(sat_path):
-                            pdf.image(sat_path,    x=134, y=img_y, w=60)
-                        elif not gmaps_api_key:
-                            pdf.set_xy(134, img_y)
-                            pdf.set_font('Courier', '', 7)
-                            pdf.multi_cell(60, 4, '[Google Satellite: no API key configured]')
-
-                        # Advance cursor past the images (approx 48mm = 60mm * 320/400 aspect)
-                        pdf.set_y(img_y + 48)
-
-                    except Exception:
-                        pdf.cell(0, 5, '[Image chips unavailable]', 0, 1)
-
+                    # ---- Metrics table (4 key/value pairs in a compact 2-col grid) ----
+                    pdf.section_bar('DETECTION METRICS')
+                    _metric_rows = [
+                        ('Estimated Area',     f'{area_sqm:,} sqm ({pixel_count} {_pword} x 100 sqm)'),
+                        ('Detection Period',   f'{a_start}  to  {a_end}'),
+                        ('Baseline Period',    f'{b_start}  to  {b_end}'),
+                        ('SAR Confirmation',
+                            f'ASCENDING orbit #{_rpt_orbit_num} | {persistence_required}/{_rpt_t1_passes} passes'
+                            if sar_available else 'NOT AVAILABLE (optical-only mode)'),
+                        ('NDVI Loss Detected', f'> {ndvi_loss_thresh} threshold'),
+                        ('NDBI Gain Detected', f'> {ndbi_gain_thresh} threshold'),
+                    ]
+                    pdf.two_col_kv(_metric_rows, lw=65, rw=125)
                     pdf.ln(4)
-                    pdf.set_font('Courier', '', 7)
-                    sar_note = (
-                        f"SAR confirmation: {orbit_pass} orbit #{dominant_orbit}, "
-                        f"{persistence_required}/{after_count} pass persistence."
+
+                    # ---- Sentinel-2 images — T0 left, T1 right ----
+                    pdf.section_bar('SENTINEL-2 MULTI-TEMPORAL IMAGERY  (True Colour RGB — 500m AOI)')
+                    IMG_W = 89   # mm each; gap = 190 - 89 - 89 = 12mm → x: 10 and 111
+                    IMG_H = 89   # 1:1 aspect (320x320 request)
+
+                    lbl_y  = pdf.get_y()
+                    img_y  = lbl_y + 6
+
+                    # T0 label
+                    pdf.img_label_bar(
+                        f'BASELINE  (T0: {b_start} to {b_end})', 10, IMG_W, lbl_y)
+                    # T1 label
+                    pdf.img_label_bar(
+                        f'CHANGE DETECTED  (T1: {a_start} to {a_end})', 111, IMG_W, lbl_y)
+
+                    # T0 image or placeholder
+                    if url_before and os.path.exists(before_path):
+                        pdf.image(before_path, x=10, y=img_y, w=IMG_W)
+                    else:
+                        pdf.placeholder_box(10, img_y, IMG_W, IMG_H, '[T0 IMAGE UNAVAILABLE]')
+
+                    # T1 image or placeholder
+                    if url_after and os.path.exists(after_path):
+                        pdf.image(after_path, x=111, y=img_y, w=IMG_W)
+                    else:
+                        pdf.placeholder_box(111, img_y, IMG_W, IMG_H, '[T1 IMAGE UNAVAILABLE]')
+
+                    # Advance cursor below images
+                    pdf.set_y(img_y + IMG_H + 4)
+
+                    # ---- Google Satellite — full width below ----
+                    SAT_W = 190   # full content width
+                    SAT_H = 95    # 640x320 = 2:1 → 190mm × 95mm
+
+                    pdf.section_bar('GOOGLE SATELLITE VIEW  (Zoom 18 — Current Ground Truth)')
+                    sat_lbl_y = pdf.get_y()
+                    sat_img_y = sat_lbl_y + 5
+
+                    if sat_path and os.path.exists(sat_path):
+                        pdf.image(sat_path, x=10, y=sat_img_y, w=SAT_W)
+                    else:
+                        _msg = '[GOOGLE SATELLITE — API KEY NOT CONFIGURED]' if not gmaps_api_key else '[GOOGLE SATELLITE — FETCH FAILED]'
+                        pdf.placeholder_box(10, sat_img_y, SAT_W, SAT_H, _msg)
+
+                    pdf.set_y(sat_img_y + SAT_H + 4)
+
+                    # ---- Detection basis ----
+                    pdf.section_bar('DETECTION BASIS & LEGAL NOTICE')
+                    _sar_note = (
+                        f"SAR confirmed: {_rpt_orbit} orbit #{_rpt_orbit_num}, "
+                        f"{persistence_required}/{_rpt_t1_passes} pass persistence, "
+                        f"cosine terrain-corrected at {ref_angle_deg}deg reference angle."
                         if sar_available
-                        else "SAR confirmation: NOT AVAILABLE - optical-only detection."
+                        else "SAR confirmation NOT AVAILABLE — optical-only detection mode applied."
                     )
-                    pdf.multi_cell(0, 4,
+                    pdf.set_font('Courier', '', 7)
+                    pdf.multi_cell(190, 4, safe_pdf_text(
                         f"Detection basis: Sentinel-2 L2A optical change analysis. "
-                        f"NDVI loss > {ndvi_loss_thresh} AND NDBI gain > {ndbi_gain_thresh} "
-                        f"(dual-condition trigger). {sar_note} "
-                        f"MMU filter: {min_area_sqm} sqm. Slope mask: <{slope_thresh}°. "
-                        f"This report is generated automatically and requires field verification "
-                        f"before enforcement action."
-                    )
+                        f"Primary trigger: NDVI loss > {ndvi_loss_thresh} AND NDBI gain > {ndbi_gain_thresh} "
+                        f"(dual-condition optical gate). Built-up context guard: T0 NDBI > 0.05. "
+                        f"MMU: {min_area_sqm} sqm. Slope mask: < {slope_thresh} deg. "
+                        f"{_sar_note} "
+                        f"This report is machine-generated. "
+                        f"Field verification is MANDATORY before any enforcement action is taken."
+                    ))
+
+
 
                 # ----- IMPORTANT: fpdf2 output syntax -----
                 # fpdf v1 (old):   pdf.output(dest='S').encode('latin-1')  <- BROKEN
